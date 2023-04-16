@@ -9,7 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/ipfs/go-cid"
-	blocks "github.com/ipfs/go-libipfs/blocks"
+	blocks "github.com/ipfs/go-block-format"
 	"github.com/libp2p/go-libp2p/core/metrics"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
