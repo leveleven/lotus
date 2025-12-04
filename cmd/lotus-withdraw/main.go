@@ -24,14 +24,28 @@ import (
 	"github.com/filecoin-project/lotus/chain/wallet"
 )
 
-type WithdrawConfig struct {
+type Config struct {
+	// 通用参数
+	KeystorePath   string
+	SenderAddress  string
+	NetworkVersion int
+	Nonce          uint64
+	GasLimit       int64
+	GasFeeCap      string
+	GasPremium     string
+
+	// 操作类型
+	Operation string // "withdraw" 或 "transfer"
+
+	// Withdraw参数
 	MinerAddress    string
 	MultisigAddress string
 	Amount          string
 	FromOwner       bool
-	KeystorePath    string
-	SenderAddress   string
-	NetworkVersion  int
+
+	// Transfer参数
+	ToAddress      string
+	TransferAmount string
 }
 
 type MessageOutput struct {
@@ -42,17 +56,31 @@ type MessageOutput struct {
 }
 
 func main() {
-	var cfg WithdrawConfig
+	var cfg Config
 	var listWallets bool
 
-	flag.StringVar(&cfg.MinerAddress, "miner", "", "Miner address")
-	flag.StringVar(&cfg.MultisigAddress, "multisig", "", "Multisig wallet address")
-	flag.StringVar(&cfg.Amount, "amount", "0", "Amount to withdraw (0 for full balance)")
-	flag.BoolVar(&cfg.FromOwner, "from-owner", true, "Withdraw from owner (true) or beneficiary (false)")
+	// 操作类型
+	flag.StringVar(&cfg.Operation, "operation", "withdraw", "Operation type: withdraw or transfer")
+
+	// 通用参数
 	flag.StringVar(&cfg.KeystorePath, "keystore", "~/.lotus/keystore", "Path to keystore")
 	flag.StringVar(&cfg.SenderAddress, "sender", "", "Sender address (must be in keystore)")
 	flag.IntVar(&cfg.NetworkVersion, "network-version", 18, "Network version (default: 18 for mainnet)")
+	flag.Uint64Var(&cfg.Nonce, "nonce", 0, "Message nonce")
+	flag.Int64Var(&cfg.GasLimit, "gas-limit", 10000000, "Gas limit")
+	flag.StringVar(&cfg.GasFeeCap, "gas-feecap", "100000000", "Gas fee cap (in attoFIL)")
+	flag.StringVar(&cfg.GasPremium, "gas-premium", "100000000", "Gas premium (in attoFIL)")
 	flag.BoolVar(&listWallets, "list", false, "List all wallets in keystore")
+
+	// Withdraw参数
+	flag.StringVar(&cfg.MinerAddress, "miner", "", "Miner address (for withdraw)")
+	flag.StringVar(&cfg.MultisigAddress, "multisig", "", "Multisig wallet address")
+	flag.StringVar(&cfg.Amount, "amount", "0", "Amount to withdraw (0 for full balance)")
+	flag.BoolVar(&cfg.FromOwner, "from-owner", true, "Withdraw from owner (true) or beneficiary (false)")
+
+	// Transfer参数
+	flag.StringVar(&cfg.ToAddress, "to", "", "Recipient address (for transfer)")
+	flag.StringVar(&cfg.TransferAmount, "transfer-amount", "", "Amount to transfer")
 	flag.Parse()
 
 	// 展开keystore路径
@@ -74,8 +102,8 @@ func main() {
 		return
 	}
 
-	if cfg.MinerAddress == "" {
-		fmt.Println("Error: miner address is required")
+	if cfg.SenderAddress == "" {
+		fmt.Println("Error: sender address is required")
 		flag.Usage()
 		os.Exit(1)
 	}
@@ -86,62 +114,123 @@ func main() {
 		os.Exit(1)
 	}
 
-	if cfg.SenderAddress == "" {
-		fmt.Println("Error: sender address is required")
-		flag.Usage()
-		os.Exit(1)
-	}
-
-	// 解析地址
-	minerAddr, err := address.NewFromString(cfg.MinerAddress)
-	if err != nil {
-		fmt.Printf("Error parsing miner address: %v\n", err)
-		os.Exit(1)
-	}
-
-	multisigAddr, err := address.NewFromString(cfg.MultisigAddress)
-	if err != nil {
-		fmt.Printf("Error parsing multisig address: %v\n", err)
-		os.Exit(1)
-	}
-
+	// 解析发送者地址
 	senderAddr, err := address.NewFromString(cfg.SenderAddress)
 	if err != nil {
 		fmt.Printf("Error parsing sender address: %v\n", err)
 		os.Exit(1)
 	}
 
-	// 解析金额
-	var amount abi.TokenAmount
-	if cfg.Amount == "0" {
-		amount = big.Zero()
-	} else {
-		filAmount, err := types.ParseFIL(cfg.Amount)
-		if err != nil {
-			fmt.Printf("Error parsing amount: %v\n", err)
+	// 解析多签地址
+	multisigAddr, err := address.NewFromString(cfg.MultisigAddress)
+	if err != nil {
+		fmt.Printf("Error parsing multisig address: %v\n", err)
+		os.Exit(1)
+	}
+
+	var output *MessageOutput
+
+	// 根据操作类型执行不同的功能
+	switch cfg.Operation {
+	case "withdraw":
+		if cfg.MinerAddress == "" {
+			fmt.Println("Error: miner address is required for withdraw operation")
+			flag.Usage()
 			os.Exit(1)
 		}
-		amount = abi.TokenAmount(filAmount)
-	}
 
-	// 创建withdraw提案
-	output, err := createWithdrawProposal(cfg, minerAddr, multisigAddr, senderAddr, amount)
-	if err != nil {
-		fmt.Printf("Error creating withdraw proposal: %v\n", err)
+		// 解析矿工地址
+		minerAddr, err := address.NewFromString(cfg.MinerAddress)
+		if err != nil {
+			fmt.Printf("Error parsing miner address: %v\n", err)
+			os.Exit(1)
+		}
+
+		// 解析金额
+		var amount abi.TokenAmount
+		if cfg.Amount == "0" {
+			amount = big.Zero()
+		} else {
+			filAmount, err := types.ParseFIL(cfg.Amount)
+			if err != nil {
+				fmt.Printf("Error parsing amount: %v\n", err)
+				os.Exit(1)
+			}
+			amount = abi.TokenAmount(filAmount)
+		}
+
+		// 创建withdraw提案
+		output, err = createWithdrawProposal(cfg, minerAddr, multisigAddr, senderAddr, amount)
+		if err != nil {
+			fmt.Printf("Error creating withdraw proposal: %v\n", err)
+			os.Exit(1)
+		}
+
+	case "transfer":
+		if cfg.ToAddress == "" {
+			fmt.Println("Error: recipient address (-to) is required for transfer operation")
+			flag.Usage()
+			os.Exit(1)
+		}
+
+		if cfg.TransferAmount == "" {
+			fmt.Println("Error: transfer amount (-transfer-amount) is required for transfer operation")
+			flag.Usage()
+			os.Exit(1)
+		}
+
+		// 解析接收者地址
+		toAddr, err := address.NewFromString(cfg.ToAddress)
+		if err != nil {
+			fmt.Printf("Error parsing recipient address: %v\n", err)
+			os.Exit(1)
+		}
+
+		// 解析转账金额
+		transferAmount, err := types.ParseFIL(cfg.TransferAmount)
+		if err != nil {
+			fmt.Printf("Error parsing transfer amount: %v\n", err)
+			os.Exit(1)
+		}
+
+		// 创建转账提案
+		output, err = createTransferProposal(cfg, multisigAddr, toAddr, senderAddr, abi.TokenAmount(transferAmount))
+		if err != nil {
+			fmt.Printf("Error creating transfer proposal: %v\n", err)
+			os.Exit(1)
+		}
+
+	default:
+		fmt.Printf("Error: unknown operation type: %s\n", cfg.Operation)
+		fmt.Println("Supported operations: withdraw, transfer")
+		flag.Usage()
 		os.Exit(1)
 	}
 
-	// 输出JSON格式的消息
-	jsonOutput, err := json.MarshalIndent(output, "", "  ")
+	// 输出可直接执行的curl命令
+	fmt.Println("=== 可直接执行的curl命令 ===")
+
+	// 创建JSON-RPC格式的请求
+	rpcRequest := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"method":  "Filecoin.MpoolPush",
+		"params":  []interface{}{output.SignedMsg},
+		"id":      1,
+	}
+
+	rpcJson, err := json.Marshal(rpcRequest)
 	if err != nil {
-		fmt.Printf("Error marshaling output: %v\n", err)
+		fmt.Printf("Error creating RPC request: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Println(string(jsonOutput))
+	fmt.Printf("curl -X POST https://api.node.glif.io/rpc/v1 \\\n")
+	fmt.Printf("  -H \"Content-Type: application/json\" \\\n")
+	fmt.Printf("  -d '%s'\n", string(rpcJson))
+	fmt.Println()
 }
 
-func createWithdrawProposal(cfg WithdrawConfig, minerAddr, multisigAddr, senderAddr address.Address, amount abi.TokenAmount) (*MessageOutput, error) {
+func createWithdrawProposal(cfg Config, minerAddr, multisigAddr, senderAddr address.Address, amount abi.TokenAmount) (*MessageOutput, error) {
 	fmt.Printf("开始创建withdraw多签提案...\n")
 	fmt.Printf("矿工地址: %s\n", minerAddr)
 	fmt.Printf("多签地址: %s\n", multisigAddr)
@@ -188,12 +277,37 @@ func createWithdrawProposal(cfg WithdrawConfig, minerAddr, multisigAddr, senderA
 		return nil, xerrors.Errorf("创建多签提案失败: %w", err)
 	}
 
+	// 设置手动输入的gas参数
+	if cfg.Nonce > 0 {
+		proposal.Nonce = cfg.Nonce
+	}
+	if cfg.GasLimit > 0 {
+		proposal.GasLimit = cfg.GasLimit
+	}
+	if cfg.GasFeeCap != "0" {
+		gasFeeCap, err := types.BigFromString(cfg.GasFeeCap)
+		if err != nil {
+			return nil, xerrors.Errorf("解析gas fee cap失败: %w", err)
+		}
+		proposal.GasFeeCap = gasFeeCap
+	}
+	if cfg.GasPremium != "0" {
+		gasPremium, err := types.BigFromString(cfg.GasPremium)
+		if err != nil {
+			return nil, xerrors.Errorf("解析gas premium失败: %w", err)
+		}
+		proposal.GasPremium = gasPremium
+	}
+
 	fmt.Printf("创建了多签提案消息:\n")
 	fmt.Printf("  发送者: %s\n", proposal.From)
 	fmt.Printf("  接收者: %s\n", proposal.To)
 	fmt.Printf("  方法: %d\n", proposal.Method)
 	fmt.Printf("  金额: %s\n", types.FIL(proposal.Value))
 	fmt.Printf("  Nonce: %d\n", proposal.Nonce)
+	fmt.Printf("  GasLimit: %d\n", proposal.GasLimit)
+	fmt.Printf("  GasFeeCap: %s\n", types.FIL(proposal.GasFeeCap))
+	fmt.Printf("  GasPremium: %s\n", types.FIL(proposal.GasPremium))
 
 	// 签名消息
 	sig, err := keystore.WalletSign(context.Background(), senderAddr, proposal.Cid().Bytes(), api.MsgMeta{
@@ -217,6 +331,105 @@ func createWithdrawProposal(cfg WithdrawConfig, minerAddr, multisigAddr, senderA
 	}
 
 	fmt.Printf("成功创建多签withdraw提案!\n")
+	fmt.Printf("消息CID: %s\n", output.MessageCID)
+	fmt.Printf("交易ID: %d\n", output.TxID)
+
+	return output, nil
+}
+
+// createTransferProposal 创建转账多签提案
+func createTransferProposal(cfg Config, multisigAddr, toAddr, senderAddr address.Address, amount abi.TokenAmount) (*MessageOutput, error) {
+	fmt.Printf("开始创建转账多签提案...\n")
+	fmt.Printf("多签地址: %s\n", multisigAddr)
+	fmt.Printf("接收者地址: %s\n", toAddr)
+	fmt.Printf("发送者地址: %s\n", senderAddr)
+	fmt.Printf("转账金额: %s\n", types.FIL(amount))
+
+	// 加载keystore
+	keystore, err := loadKeystore(cfg.KeystorePath)
+	if err != nil {
+		return nil, xerrors.Errorf("加载keystore失败: %w", err)
+	}
+
+	// 检查发送者地址是否在keystore中
+	hasKey, err := keystore.WalletHas(context.Background(), senderAddr)
+	if err != nil {
+		return nil, xerrors.Errorf("检查keystore中的发送者地址失败: %w", err)
+	}
+
+	if !hasKey {
+		return nil, xerrors.Errorf("keystore中不包含发送者地址: %s", senderAddr)
+	}
+
+	// 获取actor版本
+	av, err := actorstypes.VersionForNetwork(network.Version(cfg.NetworkVersion))
+	if err != nil {
+		return nil, xerrors.Errorf("获取actor版本失败: %w", err)
+	}
+
+	// 创建多签消息构建器
+	mb := multisig.Message(av, senderAddr)
+
+	// 创建转账提案 - 直接转账，不需要特殊参数
+	proposal, err := mb.Propose(multisigAddr, toAddr, amount, 0, nil)
+	if err != nil {
+		return nil, xerrors.Errorf("创建转账提案失败: %w", err)
+	}
+
+	// 设置手动输入的gas参数
+	if cfg.Nonce > 0 {
+		proposal.Nonce = cfg.Nonce
+	}
+	if cfg.GasLimit > 0 {
+		proposal.GasLimit = cfg.GasLimit
+	}
+	if cfg.GasFeeCap != "0" {
+		gasFeeCap, err := types.BigFromString(cfg.GasFeeCap)
+		if err != nil {
+			return nil, xerrors.Errorf("解析gas fee cap失败: %w", err)
+		}
+		proposal.GasFeeCap = gasFeeCap
+	}
+	if cfg.GasPremium != "0" {
+		gasPremium, err := types.BigFromString(cfg.GasPremium)
+		if err != nil {
+			return nil, xerrors.Errorf("解析gas premium失败: %w", err)
+		}
+		proposal.GasPremium = gasPremium
+	}
+
+	fmt.Printf("创建了转账提案消息:\n")
+	fmt.Printf("  发送者: %s\n", proposal.From)
+	fmt.Printf("  接收者: %s\n", proposal.To)
+	fmt.Printf("  方法: %d\n", proposal.Method)
+	fmt.Printf("  金额: %s\n", types.FIL(proposal.Value))
+	fmt.Printf("  Nonce: %d\n", proposal.Nonce)
+	fmt.Printf("  GasLimit: %d\n", proposal.GasLimit)
+	fmt.Printf("  GasFeeCap: %s\n", types.FIL(proposal.GasFeeCap))
+	fmt.Printf("  GasPremium: %s\n", types.FIL(proposal.GasPremium))
+
+	// 签名消息
+	sig, err := keystore.WalletSign(context.Background(), senderAddr, proposal.Cid().Bytes(), api.MsgMeta{
+		Type: api.MTChainMsg,
+	})
+	if err != nil {
+		return nil, xerrors.Errorf("签名消息失败: %w", err)
+	}
+
+	// 创建签名消息
+	smsg := &types.SignedMessage{
+		Message:   *proposal,
+		Signature: *sig,
+	}
+
+	output := &MessageOutput{
+		Message:    proposal,
+		SignedMsg:  smsg,
+		MessageCID: proposal.Cid().String(),
+		TxID:       proposal.Nonce,
+	}
+
+	fmt.Printf("成功创建转账多签提案!\n")
 	fmt.Printf("消息CID: %s\n", output.MessageCID)
 	fmt.Printf("交易ID: %d\n", output.TxID)
 
